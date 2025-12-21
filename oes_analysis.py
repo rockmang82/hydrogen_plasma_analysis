@@ -498,8 +498,17 @@ class OESAnalyzer(QMainWindow):
 
         # 현재 시간의 Intensity 가져오기
         intensities = {}
-        for name in self.BALMER_WAVELENGTHS.keys():
-            intensities[name] = self.balmer_timeseries[name][idx]
+
+        # balmer_timeseries가 비어있으면 직접 계산
+        if not self.balmer_timeseries:
+            spectrum = self.get_spectrum_at_time(self.current_time)
+            for name, wavelength in self.BALMER_WAVELENGTHS.items():
+                intensity = self.gaussian_weighted_average(wavelength, spectrum)
+                intensities[name] = intensity
+        else:
+            # 캐시된 데이터 사용
+            for name in self.BALMER_WAVELENGTHS.keys():
+                intensities[name] = self.balmer_timeseries[name][idx]
 
         # Texc 계산
         texc_eV, r2, error_msg = self.calculate_texc(intensities)
@@ -547,7 +556,7 @@ class OESAnalyzer(QMainWindow):
 
     def display_intensity_markers(self):
         """창2에 현재 시간의 Intensity 마커와 Texc 표시"""
-        if self.data is None:
+        if self.data is None or not self.balmer_timeseries:
             return
 
         # 현재 시간의 인덱스 찾기
