@@ -229,9 +229,17 @@ class OESAnalyzer(QMainWindow):
             # Run Time 추출 (두 번째 열)
             self.run_times = self.data.iloc[:, 1].values
 
-            # 시간 SpinBox 설정
+            # 데이터 유효성 검증
+            if len(self.run_times) == 0:
+                raise ValueError("데이터에 유효한 시간 정보가 없습니다.")
+
+            # 시간 SpinBox 설정 (실제 데이터 범위로 제한)
+            min_time = self.run_times.min()
+            max_time = self.run_times.max()
             time_step = np.min(np.diff(self.run_times)) if len(self.run_times) > 1 else 0.1
-            self.time_spinbox.setRange(self.run_times.min(), self.run_times.max())
+
+            self.time_spinbox.setMinimum(min_time)
+            self.time_spinbox.setMaximum(max_time)
             self.time_spinbox.setSingleStep(time_step)
             self.time_spinbox.setDecimals(2)
             self.time_spinbox.setValue(self.run_times[0])
@@ -286,6 +294,31 @@ class OESAnalyzer(QMainWindow):
         weighted_avg = np.sum(weights * intensities_in_window) / np.sum(weights)
 
         return weighted_avg
+
+    def get_time_index(self, time_value):
+        """
+        시간 값을 데이터 인덱스로 변환 (범위 검증 포함)
+
+        Parameters:
+        -----------
+        time_value : float
+            변환할 시간 값 (초)
+
+        Returns:
+        --------
+        int : 유효한 인덱스 (0 ~ len(run_times)-1)
+        """
+        if self.run_times is None or len(self.run_times) == 0:
+            return 0
+
+        # 가장 가까운 시간의 인덱스 찾기
+        idx = np.argmin(np.abs(self.run_times - time_value))
+
+        # 범위 검증 (안전장치)
+        max_idx = len(self.run_times) - 1
+        idx = max(0, min(idx, max_idx))
+
+        return idx
 
     def calculate_texc(self, intensities):
         """
@@ -493,8 +526,8 @@ class OESAnalyzer(QMainWindow):
         if self.data is None:
             return
 
-        # 현재 시간의 인덱스 찾기
-        idx = np.argmin(np.abs(self.run_times - self.current_time))
+        # 현재 시간의 인덱스 찾기 (범위 검증 포함)
+        idx = self.get_time_index(self.current_time)
 
         # 현재 시간의 Intensity 가져오기
         intensities = {}
@@ -506,8 +539,12 @@ class OESAnalyzer(QMainWindow):
                 intensity = self.gaussian_weighted_average(wavelength, spectrum)
                 intensities[name] = intensity
         else:
-            # 캐시된 데이터 사용
+            # 캐시된 데이터 사용 (추가 범위 검증)
             for name in self.BALMER_WAVELENGTHS.keys():
+                # balmer_timeseries의 길이 확인
+                if idx >= len(self.balmer_timeseries[name]):
+                    # 범위 초과 시 마지막 인덱스로 조정
+                    idx = len(self.balmer_timeseries[name]) - 1
                 intensities[name] = self.balmer_timeseries[name][idx]
 
         # Texc 계산
@@ -559,14 +596,17 @@ class OESAnalyzer(QMainWindow):
         if self.data is None or not self.balmer_timeseries:
             return
 
-        # 현재 시간의 인덱스 찾기
-        idx = np.argmin(np.abs(self.run_times - self.current_time))
+        # 현재 시간의 인덱스 찾기 (범위 검증 포함)
+        idx = self.get_time_index(self.current_time)
 
         # 각 라인의 Intensity 값 가져오기
         colors = ['C0', 'C1', 'C2']
         intensities = {}
 
         for i, name in enumerate(['Hα', 'Hβ', 'Hγ']):
+            # 인덱스 범위 검증
+            if idx >= len(self.balmer_timeseries[name]):
+                idx = len(self.balmer_timeseries[name]) - 1
             intensity = self.balmer_timeseries[name][idx]
             intensities[name] = intensity
 
@@ -631,8 +671,17 @@ class OESAnalyzer(QMainWindow):
         # 클릭한 x좌표(시간) 가져오기
         clicked_time = event.xdata
 
-        # 가장 가까운 실제 시간으로 조정
-        idx = np.argmin(np.abs(self.run_times - clicked_time))
+        if clicked_time is None:
+            return
+
+        # 클릭한 시간이 데이터 범위 내인지 검증
+        if len(self.run_times) > 0:
+            min_time = self.run_times.min()
+            max_time = self.run_times.max()
+            clicked_time = max(min_time, min(clicked_time, max_time))
+
+        # 가장 가까운 실제 시간으로 조정 (범위 검증 포함)
+        idx = self.get_time_index(clicked_time)
         selected_time = self.run_times[idx]
 
         # 이전 마커와 annotation 제거
