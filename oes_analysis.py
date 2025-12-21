@@ -10,10 +10,9 @@ import numpy as np
 import pandas as pd
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox,
-                             QFileDialog, QMessageBox, QSplitter)
+                             QFileDialog, QMessageBox, QSplitter, QLineEdit)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
 
@@ -27,6 +26,31 @@ class OESAnalyzer(QMainWindow):
         'Hγ': 434.05
     }
 
+    # NIST 원자 스펙트럼 상수 (Boltzmann Plot Method용)
+    BALMER_CONSTANTS = {
+        'Hα': {
+            'wavelength': 656.28,  # nm
+            'g': 18,               # 통계적 가중치 (n=3, 2n²)
+            'A': 4.41e7,           # 전이 확률 (s⁻¹)
+            'E': 12.09             # 상위 에너지 레벨 (eV)
+        },
+        'Hβ': {
+            'wavelength': 486.13,  # nm
+            'g': 32,               # 통계적 가중치 (n=4, 2n²)
+            'A': 8.42e6,           # 전이 확률 (s⁻¹)
+            'E': 12.75             # 상위 에너지 레벨 (eV)
+        },
+        'Hγ': {
+            'wavelength': 434.05,  # nm
+            'g': 50,               # 통계적 가중치 (n=5, 2n²)
+            'A': 2.53e6,           # 전이 확률 (s⁻¹)
+            'E': 13.05             # 상위 에너지 레벨 (eV)
+        }
+    }
+
+    # 볼츠만 상수 (eV/K)
+    K_B = 8.617333262e-5
+
     def __init__(self):
         super().__init__()
         self.data = None  # 로딩된 데이터프레임
@@ -35,6 +59,12 @@ class OESAnalyzer(QMainWindow):
         self.current_time = 0.0  # 현재 선택된 시간
         self.window_size = 2.0  # 가우시안 윈도우 크기 (기본값 ±2nm)
         self.time_line = None  # 창2의 시간 표시 선
+        self.intensity_markers = []  # 창2 클릭 시 표시되는 마커들
+        self.intensity_annotations = []  # 창2 클릭 시 표시되는 텍스트들
+        self.texc_annotation = None  # 창2에 표시되는 Texc 텍스트
+        self.timeseries_ax2 = None  # 창2의 보조 Y축 (Texc용)
+        self.balmer_timeseries = {}  # 전체 시계열 Intensity 데이터 캐시
+        self.texc_timeseries = []  # 전체 시계열 Texc 데이터
 
         self.init_ui()
 
@@ -101,6 +131,20 @@ class OESAnalyzer(QMainWindow):
         self.time_spinbox.valueChanged.connect(self.on_time_changed)
         layout.addWidget(self.time_spinbox)
 
+        layout.addSpacing(20)
+
+        # 여기 온도 표시
+        texc_label = QLabel('여기 온도')
+        layout.addWidget(texc_label)
+
+        self.texc_lineedit = QLineEdit()
+        self.texc_lineedit.setReadOnly(True)
+        self.texc_lineedit.setText('---')
+        layout.addWidget(self.texc_lineedit)
+
+        self.r2_label = QLabel('(R² = ---)')
+        layout.addWidget(self.r2_label)
+
         layout.addStretch()
 
         return panel
@@ -111,23 +155,20 @@ class OESAnalyzer(QMainWindow):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 창1: 스펙트럼 그래프
+        # 창1: 스펙트럼 그래프 (툴바 제거)
         self.spectrum_figure = Figure(figsize=(8, 4), facecolor='white')
         self.spectrum_canvas = FigureCanvas(self.spectrum_figure)
         self.spectrum_ax = self.spectrum_figure.add_subplot(111)
-        self.spectrum_toolbar = NavigationToolbar(self.spectrum_canvas, widget)
 
         spectrum_widget = QWidget()
         spectrum_layout = QVBoxLayout(spectrum_widget)
         spectrum_layout.setContentsMargins(0, 0, 0, 0)
-        spectrum_layout.addWidget(self.spectrum_toolbar)
         spectrum_layout.addWidget(self.spectrum_canvas)
 
-        # 창2: 시계열 그래프
+        # 창2: 시계열 그래프 (툴바 제거)
         self.timeseries_figure = Figure(figsize=(8, 4), facecolor='white')
         self.timeseries_canvas = FigureCanvas(self.timeseries_figure)
         self.timeseries_ax = self.timeseries_figure.add_subplot(111)
-        self.timeseries_toolbar = NavigationToolbar(self.timeseries_canvas, widget)
 
         # 창2에 클릭 이벤트 연결
         self.timeseries_canvas.mpl_connect('button_press_event', self.on_timeseries_click)
@@ -135,7 +176,6 @@ class OESAnalyzer(QMainWindow):
         timeseries_widget = QWidget()
         timeseries_layout = QVBoxLayout(timeseries_widget)
         timeseries_layout.setContentsMargins(0, 0, 0, 0)
-        timeseries_layout.addWidget(self.timeseries_toolbar)
         timeseries_layout.addWidget(self.timeseries_canvas)
 
         # 수직 분할기로 1:1 비율 설정
@@ -247,6 +287,77 @@ class OESAnalyzer(QMainWindow):
 
         return weighted_avg
 
+    def calculate_texc(self, intensities):
+        """
+        Boltzmann Plot Method로 여기 전자 온도 계산
+
+        Parameters:
+        -----------
+        intensities : dict
+            {'Hα': I_alpha, 'Hβ': I_beta, 'Hγ': I_gamma} 형태의 Intensity 딕셔너리
+
+        Returns:
+        --------
+        tuple : (Texc_eV, R_squared, error_message)
+            - Texc_eV: 여기 전자 온도 (eV), 계산 실패 시 None
+            - R_squared: 결정 계수, 계산 실패 시 None
+            - error_message: 오류 메시지, 성공 시 None
+        """
+        try:
+            # 데이터 준비
+            x_data = []  # E_n (eV)
+            y_data = []  # ln(I × λ / (g × A))
+
+            for name in ['Hα', 'Hβ', 'Hγ']:
+                I = intensities[name]
+                const = self.BALMER_CONSTANTS[name]
+
+                # Intensity 유효성 검사
+                if I <= 0:
+                    return None, None, "계산 불가: 유효하지 않은 Intensity"
+
+                # y = ln(I × λ / (g × A)) 계산
+                lambda_nm = const['wavelength']
+                g = const['g']
+                A = const['A']
+                E = const['E']
+
+                y = np.log(I * lambda_nm / (g * A))
+
+                x_data.append(E)
+                y_data.append(y)
+
+            # 선형 회귀 (y = slope * x + intercept)
+            x_data = np.array(x_data)
+            y_data = np.array(y_data)
+
+            # numpy polyfit 사용 (1차 다항식)
+            coeffs = np.polyfit(x_data, y_data, 1)
+            slope = coeffs[0]
+            intercept = coeffs[1]
+
+            # 기울기 검사 (양수면 비물리적)
+            if slope >= 0:
+                return None, None, "계산 불가: 비물리적 기울기 (양수)"
+
+            # R² 계산
+            y_fit = slope * x_data + intercept
+            ss_res = np.sum((y_data - y_fit) ** 2)
+            ss_tot = np.sum((y_data - np.mean(y_data)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot)
+
+            # Texc 계산: slope = -1 / (k_B × T_exc)
+            # T_exc (K) = -1 / (k_B × slope)
+            T_exc_K = -1.0 / (self.K_B * slope)
+
+            # eV 단위로 변환: T_exc_eV = k_B × T_exc (K)
+            T_exc_eV = self.K_B * T_exc_K
+
+            return T_exc_eV, r_squared, None
+
+        except Exception as e:
+            return None, None, f"계산 불가: {str(e)}"
+
     def get_spectrum_at_time(self, time):
         """
         특정 시간의 스펙트럼 데이터 추출
@@ -292,28 +403,63 @@ class OESAnalyzer(QMainWindow):
             return
 
         # 각 발머 계열 파장에 대한 시계열 데이터 계산
-        balmer_timeseries = {name: [] for name in self.BALMER_WAVELENGTHS.keys()}
+        self.balmer_timeseries = {name: [] for name in self.BALMER_WAVELENGTHS.keys()}
+        self.texc_timeseries = []
 
         for i in range(len(self.run_times)):
             spectrum = self.data.iloc[i, 2:].values.astype(float)
 
+            # Intensity 계산
+            intensities = {}
             for name, wavelength in self.BALMER_WAVELENGTHS.items():
                 intensity = self.gaussian_weighted_average(wavelength, spectrum)
-                balmer_timeseries[name].append(intensity)
+                self.balmer_timeseries[name].append(intensity)
+                intensities[name] = intensity
+
+            # Texc 계산
+            texc_eV, r2, error_msg = self.calculate_texc(intensities)
+            if error_msg is None:
+                self.texc_timeseries.append(texc_eV)
+            else:
+                self.texc_timeseries.append(np.nan)  # 계산 불가 시 NaN
 
         # 그래프 업데이트
         self.timeseries_ax.clear()
 
-        # 3개 라인 그리기
+        # 보조 Y축이 있으면 제거
+        if self.timeseries_ax2 is not None:
+            self.timeseries_ax2.remove()
+            self.timeseries_ax2 = None
+
+        # 3개 Intensity 라인 그리기 (좌측 Y축)
         colors = ['C0', 'C1', 'C2']  # Matplotlib 기본 색상 순환
+        lines1 = []
+        labels1 = []
         for i, (name, wavelength) in enumerate(self.BALMER_WAVELENGTHS.items()):
-            self.timeseries_ax.plot(
+            line, = self.timeseries_ax.plot(
                 self.run_times,
-                balmer_timeseries[name],
+                self.balmer_timeseries[name],
                 label=f'{name} ({wavelength} nm)',
                 color=colors[i],
                 linewidth=1.5
             )
+            lines1.append(line)
+            labels1.append(f'{name} ({wavelength} nm)')
+
+        # 보조 Y축 생성 (우측)
+        self.timeseries_ax2 = self.timeseries_ax.twinx()
+
+        # Texc 라인 그리기 (우측 Y축)
+        line2, = self.timeseries_ax2.plot(
+            self.run_times,
+            self.texc_timeseries,
+            label='Texc',
+            color='#000000',
+            linestyle='-',
+            marker='s',
+            markersize=4,
+            linewidth=1.5
+        )
 
         # 현재 선택된 시간 표시 (빨간 수직 점선)
         self.time_line = self.timeseries_ax.axvline(
@@ -323,19 +469,58 @@ class OESAnalyzer(QMainWindow):
             linewidth=1.5
         )
 
+        # 축 라벨 설정
         self.timeseries_ax.set_xlabel('Run Time (sec)', fontsize=10)
         self.timeseries_ax.set_ylabel('Intensity (a.u.)', fontsize=10)
+        self.timeseries_ax2.set_ylabel('Excitation Temperature (eV)', fontsize=10)
+        self.timeseries_ax2.tick_params(axis='y', labelcolor='#000000')
+
+        # 범례 통합
+        lines = lines1 + [line2]
+        labels = labels1 + ['Texc']
+        self.timeseries_ax.legend(lines, labels, loc='best', fontsize=9)
+
         self.timeseries_ax.set_title('Balmer Series Time Trace', fontsize=10)
-        self.timeseries_ax.legend(loc='best', fontsize=9)
         self.timeseries_ax.grid(True, alpha=0.7, linestyle='--', color='lightgray')
         self.timeseries_figure.tight_layout()
         self.timeseries_canvas.draw()
+
+        # 초기 Texc 표시 업데이트
+        self.update_texc_display()
+
+    def update_texc_display(self):
+        """컨트롤 패널의 Texc 표시 업데이트"""
+        if self.data is None:
+            return
+
+        # 현재 시간의 인덱스 찾기
+        idx = np.argmin(np.abs(self.run_times - self.current_time))
+
+        # 현재 시간의 Intensity 가져오기
+        intensities = {}
+        for name in self.BALMER_WAVELENGTHS.keys():
+            intensities[name] = self.balmer_timeseries[name][idx]
+
+        # Texc 계산
+        texc_eV, r2, error_msg = self.calculate_texc(intensities)
+
+        if error_msg is None:
+            # 성공적으로 계산됨
+            self.texc_lineedit.setText(f'{texc_eV:.2f} eV')
+            self.r2_label.setText(f'(R² = {r2:.2f})')
+        else:
+            # 계산 실패
+            self.texc_lineedit.setText(error_msg)
+            self.r2_label.setText('(R² = ---)')
 
     def on_time_changed(self, value):
         """시간 SpinBox 값 변경 이벤트"""
         self.current_time = value
         self.update_spectrum()
+        self.clear_intensity_markers()  # 마커 초기화
         self.update_time_line()
+        self.update_texc_display()
+        self.timeseries_canvas.draw()  # 캔버스 업데이트
 
     def on_window_changed(self, value):
         """Window SpinBox 값 변경 이벤트"""
@@ -343,9 +528,92 @@ class OESAnalyzer(QMainWindow):
         if self.data is not None:
             self.update_timeseries()
 
+    def clear_intensity_markers(self):
+        """창2의 Intensity 마커와 annotation 제거"""
+        # 마커 제거
+        for marker in self.intensity_markers:
+            marker.remove()
+        self.intensity_markers = []
+
+        # Annotation 제거
+        for ann in self.intensity_annotations:
+            ann.remove()
+        self.intensity_annotations = []
+
+        # Texc annotation 제거
+        if self.texc_annotation is not None:
+            self.texc_annotation.remove()
+            self.texc_annotation = None
+
+    def display_intensity_markers(self):
+        """창2에 현재 시간의 Intensity 마커와 Texc 표시"""
+        if self.data is None:
+            return
+
+        # 현재 시간의 인덱스 찾기
+        idx = np.argmin(np.abs(self.run_times - self.current_time))
+
+        # 각 라인의 Intensity 값 가져오기
+        colors = ['C0', 'C1', 'C2']
+        intensities = {}
+
+        for i, name in enumerate(['Hα', 'Hβ', 'Hγ']):
+            intensity = self.balmer_timeseries[name][idx]
+            intensities[name] = intensity
+
+            # 마커 표시
+            marker, = self.timeseries_ax.plot(
+                self.current_time,
+                intensity,
+                marker='o',
+                markersize=8,
+                color=colors[i],
+                markeredgecolor='white',
+                markeredgewidth=1.5,
+                zorder=10
+            )
+            self.intensity_markers.append(marker)
+
+            # Annotation 표시
+            ann = self.timeseries_ax.annotate(
+                f'{intensity:.1f}',
+                xy=(self.current_time, intensity),
+                xytext=(5, 5),
+                textcoords='offset points',
+                fontsize=9,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+            )
+            self.intensity_annotations.append(ann)
+
+        # Texc 계산 및 그래프 내부 표시
+        texc_eV, r2, error_msg = self.calculate_texc(intensities)
+
+        if error_msg is None:
+            texc_text = f'Texc = {texc_eV:.2f} eV\n(R² = {r2:.2f})'
+        else:
+            texc_text = error_msg
+
+        # 그래프 우측 상단에 Texc 표시
+        self.texc_annotation = self.timeseries_ax.text(
+            0.98, 0.98,
+            texc_text,
+            transform=self.timeseries_ax.transAxes,
+            fontsize=10,
+            verticalalignment='top',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9)
+        )
+
+        self.timeseries_canvas.draw()
+
     def on_timeseries_click(self, event):
         """창2 그래프 클릭 이벤트"""
-        if event.inaxes != self.timeseries_ax:
+        # 보조 Y축도 포함하여 클릭 가능하도록 설정
+        valid_axes = [self.timeseries_ax]
+        if self.timeseries_ax2 is not None:
+            valid_axes.append(self.timeseries_ax2)
+
+        if event.inaxes not in valid_axes:
             return
 
         if self.data is None:
@@ -358,14 +626,29 @@ class OESAnalyzer(QMainWindow):
         idx = np.argmin(np.abs(self.run_times - clicked_time))
         selected_time = self.run_times[idx]
 
-        # SpinBox 업데이트 (이것이 자동으로 on_time_changed 호출)
-        self.time_spinbox.setValue(selected_time)
+        # 이전 마커와 annotation 제거
+        self.clear_intensity_markers()
+
+        # 새로운 시간 설정
+        self.current_time = selected_time
+
+        # SpinBox 업데이트 (값이 같으면 이벤트가 발생하지 않으므로 직접 업데이트)
+        if self.time_spinbox.value() != selected_time:
+            self.time_spinbox.setValue(selected_time)
+        else:
+            # 값이 같으면 수동으로 업데이트
+            self.update_spectrum()
+            self.update_time_line()
+            self.update_texc_display()
+
+        # 마커 및 Texc 표시
+        self.display_intensity_markers()
 
     def update_time_line(self):
         """창2의 시간 표시선 업데이트"""
         if self.time_line is not None:
             self.time_line.set_xdata([self.current_time, self.current_time])
-            self.timeseries_canvas.draw()
+            # 캔버스는 display_intensity_markers에서 그려지므로 여기서는 그리지 않음
 
 
 def main():
