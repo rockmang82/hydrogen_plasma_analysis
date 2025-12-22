@@ -8,12 +8,13 @@
 - **시계열 분석**: 발머 계열 파장(Hα, Hβ, Hγ)의 시간에 따른 강도 변화 추적
 - **가우시안 가중 평균**: 정확한 파장 강도 추출을 위한 고급 알고리즘
 - **여기 전자 온도 계산**: Boltzmann Plot Method 기반 Texc 계산 및 표시
+- **Boltzmann Plot 시각화**: 온도 계산 과정을 그래프로 시각화하는 팝업창
 - **인터랙티브 UI**: 그래프 클릭 시 Intensity 마커 및 Texc 실시간 표시
 
 ## 요구사항
 
 ```bash
-pip install numpy pandas matplotlib PyQt5
+pip install numpy pandas matplotlib PyQt5 scipy
 ```
 
 ## 실행 방법
@@ -50,6 +51,18 @@ python oes_analysis.py
 5. **여기 온도 확인**
    - 컨트롤 패널: 현재 시간의 Texc 및 R² 값
    - 그래프 우측 상단: 클릭 시 해당 시간의 Texc 및 R² 값
+
+6. **Boltzmann Plot 시각화**
+   - 컨트롤 패널의 "Boltzmann Plot" 체크박스를 선택하여 팝업창 활성화
+   - 팝업창은 비모달(non-modal) 방식으로 동작하여 메인 창과 동시에 조작 가능
+   - 시간 변경 시 자동으로 그래프 업데이트
+   - 그래프 구성:
+     - 3개의 파란색 원형 마커: Hα, Hβ, Hγ 데이터 포인트
+     - 빨간색 점선: 선형 회귀 라인 (Linear Fit)
+     - X축: Upper Energy Level (eV)
+     - Y축: ln(I × λ / (g × A))
+   - 텍스트 박스: Texc (eV), Slope, R² 값 표시
+   - 창 제목: 현재 시간 표시 (예: "Boltzmann Plot - t = 1.5 s")
 
 ## 입력 파일 형식
 
@@ -116,17 +129,26 @@ NIST 원자 스펙트럼 상수 (하드코딩):
 oes_analysis.py
 ├── OESAnalyzer (메인 클래스)
 │   ├── init_ui(): GUI 초기화
-│   ├── create_control_panel(): 컨트롤 패널 생성 (온도 표시 위젯 포함)
+│   ├── create_control_panel(): 컨트롤 패널 생성 (온도 표시 및 Boltzmann Plot 체크박스 포함)
 │   ├── create_graph_area(): 그래프 영역 생성 (툴바 제거)
 │   ├── load_file(): 데이터 파일 로딩
 │   ├── gaussian_weighted_average(): 가우시안 가중 평균 계산
 │   ├── calculate_texc(): Boltzmann Plot Method로 Texc 계산
+│   ├── calculate_boltzmann_plot_data(): Boltzmann Plot 데이터 계산
 │   ├── update_spectrum(): 스펙트럼 그래프 업데이트
 │   ├── update_timeseries(): 시계열 그래프 업데이트 (보조 Y축 포함)
 │   ├── update_texc_display(): 컨트롤 패널의 Texc 표시 업데이트
 │   ├── display_intensity_markers(): 창2에 Intensity 마커 및 Texc 표시
 │   ├── clear_intensity_markers(): 마커 및 annotation 제거
-│   └── on_timeseries_click(): 창2 클릭 이벤트 처리
+│   ├── on_timeseries_click(): 창2 클릭 이벤트 처리
+│   ├── on_boltzmann_checkbox_changed(): Boltzmann Plot 체크박스 상태 변경 처리
+│   ├── show_boltzmann_plot(): Boltzmann Plot 창 표시
+│   ├── close_boltzmann_plot(): Boltzmann Plot 창 닫기
+│   └── update_boltzmann_plot(): Boltzmann Plot 창 업데이트
+├── BoltzmannPlotWindow (팝업 창 클래스)
+│   ├── __init__(): 창 초기화 및 레이아웃 생성
+│   ├── update_plot(): 그래프 및 텍스트 업데이트
+│   └── closeEvent(): 창 닫기 이벤트 처리 (체크박스 동기화)
 └── main(): 메인 함수
 ```
 
@@ -138,6 +160,7 @@ oes_analysis.py
 - 시간 입력 (데이터 범위)
 - **여기 온도 표시** (읽기 전용, 복사 가능)
 - **R² 표시**
+- **Boltzmann Plot 체크박스**: 시각화 팝업창 표시/숨김
 
 ### 그래프 영역 (우측)
 - **창1 (상단)**: 스펙트럼 그래프
@@ -148,6 +171,13 @@ oes_analysis.py
   - 좌측 Y축: Intensity (a.u.) - Hα, Hβ, Hγ
   - 우측 Y축: Excitation Temperature (eV) - Texc
   - 클릭 시 마커 및 Texc 값 표시
+
+- **창3 (팝업)**: Boltzmann Plot 그래프
+  - X축: Upper Energy Level (eV)
+  - Y축: ln(I × λ / (g × A))
+  - 데이터 포인트: 파란색 원형 마커
+  - 선형 회귀: 빨간색 점선
+  - 정보 표시: Texc, Slope, R² 값
 
 ## 개발자 정보
 
