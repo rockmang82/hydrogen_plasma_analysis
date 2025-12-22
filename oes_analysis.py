@@ -797,12 +797,18 @@ class OESAnalyzer(QMainWindow):
             self.close_boltzmann_plot()
 
     def show_boltzmann_plot(self):
-        """Boltzmann Plot 창 표시"""
+        """Boltzmann Plot 창 표시 (메인 창 우측에 위치)"""
         if self.boltzmann_window is None:
             self.boltzmann_window = BoltzmannPlotWindow(self)
 
         # 데이터 계산 및 업데이트
         self.update_boltzmann_plot()
+
+        # 팝업창을 메인 창 우측에 위치 설정
+        main_geometry = self.geometry()
+        popup_x = main_geometry.x() + main_geometry.width() + 10
+        popup_y = main_geometry.y()
+        self.boltzmann_window.move(popup_x, popup_y)
 
         # 창 표시
         self.boltzmann_window.show()
@@ -836,10 +842,10 @@ class OESAnalyzer(QMainWindow):
 
 
 class BoltzmannPlotWindow(QWidget):
-    """Boltzmann Plot 표시 팝업창 (Non-modal)"""
+    """Boltzmann Plot 표시 팝업창 (독립 윈도우)"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, Qt.Window)  # Qt.Window 플래그로 독립 창 생성
         self.parent_widget = parent
         self.setWindowTitle("Boltzmann Plot")
         self.setup_ui()
@@ -863,16 +869,30 @@ class BoltzmannPlotWindow(QWidget):
         self.ax.grid(True, linestyle='--', alpha=0.7, color='lightgray')
         self.figure.tight_layout()
 
-        # 창 크기 설정
-        self.resize(600, 500)
+        # 창 크기 고정 (리사이즈 불가)
+        self.setFixedSize(600, 450)
 
     def update_plot(self, energy_levels, y_values, slope, intercept, r_squared, texc_eV, current_time):
         """그래프 업데이트"""
         self.ax.clear()
 
+        # 라벨 리스트 (그리스 문자 사용)
+        labels = ['Hα', 'Hβ', 'Hγ']
+
         # 데이터 포인트 표시
         self.ax.plot(energy_levels, y_values, 'o',
                      markersize=10, color='#1f77b4', label='Data', zorder=3)
+
+        # 각 데이터 포인트에 라벨 추가
+        for i, (x, y, label) in enumerate(zip(energy_levels, y_values, labels)):
+            self.ax.annotate(label,
+                             xy=(x, y),
+                             xytext=(8, 0),
+                             textcoords='offset points',
+                             fontsize=8,
+                             color='black',
+                             va='center',
+                             ha='left')
 
         # 선형 회귀 직선 표시
         x_min, x_max = energy_levels.min() - 0.3, energy_levels.max() + 0.3
@@ -914,9 +934,12 @@ class BoltzmannPlotWindow(QWidget):
         self.canvas.draw()
 
     def closeEvent(self, event):
-        """창 닫힐 때 체크박스 동기화"""
+        """창 닫힐 때 체크박스 동기화 (X 버튼 클릭 시)"""
         if self.parent_widget is not None:
+            # 시그널 순환 방지를 위해 blockSignals 사용
+            self.parent_widget.boltzmann_checkbox.blockSignals(True)
             self.parent_widget.boltzmann_checkbox.setChecked(False)
+            self.parent_widget.boltzmann_checkbox.blockSignals(False)
         event.accept()
 
 
