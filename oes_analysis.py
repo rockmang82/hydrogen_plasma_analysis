@@ -8,9 +8,10 @@ OES (Optical Emission Spectroscopy) 데이터 분석 프로그램
 import sys
 import numpy as np
 import pandas as pd
+from scipy.stats import linregress
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox,
-                             QFileDialog, QMessageBox, QSplitter, QLineEdit)
+                             QFileDialog, QMessageBox, QSplitter, QLineEdit, QCheckBox)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -65,6 +66,7 @@ class OESAnalyzer(QMainWindow):
         self.timeseries_ax2 = None  # 창2의 보조 Y축 (Texc용)
         self.balmer_timeseries = {}  # 전체 시계열 Intensity 데이터 캐시
         self.texc_timeseries = []  # 전체 시계열 Texc 데이터
+        self.boltzmann_window = None  # 창3: Boltzmann Plot 팝업창
 
         self.init_ui()
 
@@ -144,6 +146,14 @@ class OESAnalyzer(QMainWindow):
 
         self.r2_label = QLabel('(R² = ---)')
         layout.addWidget(self.r2_label)
+
+        layout.addSpacing(20)
+
+        # Boltzmann Plot 체크박스
+        self.boltzmann_checkbox = QCheckBox('Boltzmann Plot')
+        self.boltzmann_checkbox.setChecked(False)
+        self.boltzmann_checkbox.stateChanged.connect(self.on_boltzmann_checkbox_changed)
+        layout.addWidget(self.boltzmann_checkbox)
 
         layout.addStretch()
 
@@ -568,11 +578,16 @@ class OESAnalyzer(QMainWindow):
         self.update_texc_display()
         self.timeseries_canvas.draw()  # 캔버스 업데이트
 
+        # 창3이 열려있으면 업데이트
+        self.update_boltzmann_plot()
+
     def on_window_changed(self, value):
         """Window SpinBox 값 변경 이벤트"""
         self.window_size = value
         if self.data is not None:
             self.update_timeseries()
+            # 창3이 열려있으면 업데이트
+            self.update_boltzmann_plot()
 
     def clear_intensity_markers(self):
         """창2의 Intensity 마커와 annotation 제거"""
@@ -698,6 +713,7 @@ class OESAnalyzer(QMainWindow):
             self.update_spectrum()
             self.update_time_line()
             self.update_texc_display()
+            self.update_boltzmann_plot()  # 창3 업데이트
 
         # 마커 및 Texc 표시
         self.display_intensity_markers()
@@ -707,6 +723,201 @@ class OESAnalyzer(QMainWindow):
         if self.time_line is not None:
             self.time_line.set_xdata([self.current_time, self.current_time])
             # 캔버스는 display_intensity_markers에서 그려지므로 여기서는 그리지 않음
+
+    def calculate_boltzmann_plot_data(self):
+        """
+        Boltzmann Plot용 데이터 계산
+
+        Returns:
+        --------
+        tuple : (energy_levels, y_values, slope, intercept, r_squared, texc_eV, error_msg)
+            - energy_levels: X축 데이터 (E_n, eV)
+            - y_values: Y축 데이터 (ln(I×λ/(g×A)))
+            - slope: 선형 회귀 기울기
+            - intercept: 선형 회귀 y절편
+            - r_squared: 결정 계수
+            - texc_eV: 여기 전자 온도 (eV)
+            - error_msg: 오류 메시지 (성공 시 None)
+        """
+        if self.data is None or not self.balmer_timeseries:
+            return None, None, None, None, None, None, "데이터가 로딩되지 않았습니다"
+
+        # 현재 시간의 인덱스 찾기
+        idx = self.get_time_index(self.current_time)
+
+        energy_levels = []
+        y_values = []
+        intensities = {}
+
+        for name in ['Hα', 'Hβ', 'Hγ']:
+            # 인덱스 범위 검증
+            if idx >= len(self.balmer_timeseries[name]):
+                idx = len(self.balmer_timeseries[name]) - 1
+
+            intensity = self.balmer_timeseries[name][idx]
+            intensities[name] = intensity
+            const = self.BALMER_CONSTANTS[name]
+
+            # 유효하지 않은 intensity 체크
+            if intensity <= 0:
+                return None, None, None, None, None, None, "계산 불가: 유효하지 않은 Intensity"
+
+            wavelength = const['wavelength']
+            g = const['g']
+            A = const['A']
+            E = const['E']
+
+            # Y값 계산: ln((I × λ) / (g × A))
+            y = np.log((intensity * wavelength) / (g * A))
+
+            energy_levels.append(E)
+            y_values.append(y)
+
+        # 선형 회귀
+        energy_levels = np.array(energy_levels)
+        y_values = np.array(y_values)
+
+        slope, intercept, r_value, p_value, std_err = linregress(energy_levels, y_values)
+        r_squared = r_value ** 2
+
+        # 온도 계산: slope = -1 / (k_B × T)
+        if slope >= 0:
+            return None, None, None, None, None, None, "계산 불가: 비물리적 기울기 (양수)"
+
+        T_kelvin = -1.0 / (self.K_B * slope)
+        texc_eV = self.K_B * T_kelvin
+
+        return energy_levels, y_values, slope, intercept, r_squared, texc_eV, None
+
+    def on_boltzmann_checkbox_changed(self, state):
+        """Boltzmann Plot 체크박스 상태 변경 이벤트"""
+        if state == Qt.Checked:
+            self.show_boltzmann_plot()
+        else:
+            self.close_boltzmann_plot()
+
+    def show_boltzmann_plot(self):
+        """Boltzmann Plot 창 표시"""
+        if self.boltzmann_window is None:
+            self.boltzmann_window = BoltzmannPlotWindow(self)
+
+        # 데이터 계산 및 업데이트
+        self.update_boltzmann_plot()
+
+        # 창 표시
+        self.boltzmann_window.show()
+        self.boltzmann_window.raise_()
+        self.boltzmann_window.activateWindow()
+
+    def close_boltzmann_plot(self):
+        """Boltzmann Plot 창 닫기"""
+        if self.boltzmann_window is not None:
+            self.boltzmann_window.close()
+            self.boltzmann_window = None
+
+    def update_boltzmann_plot(self):
+        """Boltzmann Plot 창 업데이트"""
+        if self.boltzmann_window is None or not self.boltzmann_window.isVisible():
+            return
+
+        # 데이터 계산
+        energy_levels, y_values, slope, intercept, r_squared, texc_eV, error_msg = \
+            self.calculate_boltzmann_plot_data()
+
+        if error_msg is not None:
+            # 계산 실패 시 메시지 표시
+            self.boltzmann_window.show_error(error_msg)
+        else:
+            # 그래프 업데이트
+            self.boltzmann_window.update_plot(
+                energy_levels, y_values, slope, intercept,
+                r_squared, texc_eV, self.current_time
+            )
+
+
+class BoltzmannPlotWindow(QWidget):
+    """Boltzmann Plot 표시 팝업창 (Non-modal)"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_widget = parent
+        self.setWindowTitle("Boltzmann Plot")
+        self.setup_ui()
+
+    def setup_ui(self):
+        """UI 초기화"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Matplotlib Figure 생성
+        self.figure = Figure(figsize=(6, 5), facecolor='white')
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot(111)
+
+        layout.addWidget(self.canvas)
+
+        # 초기 빈 그래프 설정
+        self.ax.set_xlabel('Upper Energy Level E$_n$ (eV)', fontsize=10)
+        self.ax.set_ylabel('ln(I$_{nm}$λ$_{nm}$/g$_n$A$_{nm}$)', fontsize=10)
+        self.ax.set_title('Boltzmann Plot', fontsize=10)
+        self.ax.grid(True, linestyle='--', alpha=0.7, color='lightgray')
+        self.figure.tight_layout()
+
+        # 창 크기 설정
+        self.resize(600, 500)
+
+    def update_plot(self, energy_levels, y_values, slope, intercept, r_squared, texc_eV, current_time):
+        """그래프 업데이트"""
+        self.ax.clear()
+
+        # 데이터 포인트 표시
+        self.ax.plot(energy_levels, y_values, 'o',
+                     markersize=10, color='#1f77b4', label='Data', zorder=3)
+
+        # 선형 회귀 직선 표시
+        x_min, x_max = energy_levels.min() - 0.3, energy_levels.max() + 0.3
+        x_line = np.array([x_min, x_max])
+        y_line = slope * x_line + intercept
+        self.ax.plot(x_line, y_line, '--', color='#ff0000',
+                     linewidth=1.5, label='Linear Fit', zorder=2)
+
+        # 수치 표시 박스
+        textstr = f'Texc = {texc_eV:.2f} eV\nSlope = {slope:.2f}\nR² = {r_squared:.2f}'
+        self.ax.text(0.05, 0.05, textstr, transform=self.ax.transAxes,
+                     fontsize=10, verticalalignment='bottom', horizontalalignment='left',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+
+        # 축 라벨 및 제목
+        self.ax.set_xlabel('Upper Energy Level E$_n$ (eV)', fontsize=10)
+        self.ax.set_ylabel('ln(I$_{nm}$λ$_{nm}$/g$_n$A$_{nm}$)', fontsize=10)
+        self.ax.set_title('Boltzmann Plot', fontsize=10)
+        self.ax.grid(True, linestyle='--', alpha=0.7, color='lightgray')
+
+        # 범례
+        self.ax.legend(loc='upper right', fontsize=9)
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+        # 윈도우 제목 업데이트
+        self.setWindowTitle(f'Boltzmann Plot - t = {current_time:.1f} s')
+
+    def show_error(self, error_msg):
+        """에러 메시지 표시"""
+        self.ax.clear()
+        self.ax.text(0.5, 0.5, error_msg, transform=self.ax.transAxes,
+                     fontsize=12, verticalalignment='center', horizontalalignment='center',
+                     bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9, edgecolor='red'))
+        self.ax.set_xlabel('Upper Energy Level E$_n$ (eV)', fontsize=10)
+        self.ax.set_ylabel('ln(I$_{nm}$λ$_{nm}$/g$_n$A$_{nm}$)', fontsize=10)
+        self.ax.set_title('Boltzmann Plot', fontsize=10)
+        self.canvas.draw()
+
+    def closeEvent(self, event):
+        """창 닫힐 때 체크박스 동기화"""
+        if self.parent_widget is not None:
+            self.parent_widget.boltzmann_checkbox.setChecked(False)
+        event.accept()
 
 
 def main():
