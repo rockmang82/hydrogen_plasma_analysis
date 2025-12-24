@@ -775,6 +775,7 @@ class OESAnalyzer(QMainWindow):
         import matplotlib.pyplot as plt
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         y_min, y_max = self.spectrum_ax.get_ylim()
+        y_mid = y_min + (y_max - y_min) * 0.5  # Y축 50% 위치 (정확한 중앙)
 
         for i, key in enumerate(self.BALMER_KEYS):
             if key in self.detected_wavelengths:
@@ -786,11 +787,23 @@ class OESAnalyzer(QMainWindow):
                 self.spectrum_ax.axvline(x=wl, linestyle=':', color=color,
                                           linewidth=1.0, alpha=0.7)
 
-                # 라벨 (하단에 두 줄로 표시: 이름 + 파장값)
+                # 라벨 (중단에 두 줄로 표시: 이름 + 파장값, 수직선 좌측)
                 label_text = f'{display_name}\n{wl:.1f} nm'
-                self.spectrum_ax.text(wl, y_min + (y_max - y_min) * 0.02,
-                                       label_text,
-                                       fontsize=8, ha='center', va='bottom', color=color)
+                self.spectrum_ax.text(
+                    wl - 2,  # 수직선 좌측으로 약간 오프셋 (2nm)
+                    y_mid,
+                    label_text,
+                    fontsize=8,
+                    ha='right',      # 우측 정렬
+                    va='center',     # 수직 중앙 정렬
+                    color=color,
+                    bbox=dict(
+                        boxstyle='round,pad=0.3',
+                        facecolor='lightgray',
+                        alpha=0.7,
+                        edgecolor='none'
+                    )
+                )
 
         self.spectrum_figure.tight_layout()
         self.spectrum_canvas.draw()
