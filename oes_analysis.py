@@ -80,6 +80,8 @@ class OESAnalyzer(QMainWindow):
         # Dark Spectrum Subtraction 관련
         self.dark_spectrum = None  # Dark Spectrum 배열
         self.dark_subtraction_enabled = False  # Dark Subtraction 활성화 여부
+        self.dark_time_vline = None  # 창2 Dark Time 수직선
+        self.dark_time_annotation = None  # 창2 Dark Time 라벨
 
         self.init_ui()
 
@@ -195,6 +197,7 @@ class OESAnalyzer(QMainWindow):
         self.dark_time_spinbox.setMaximum(1.0)  # 파일 로딩 후 업데이트
         self.dark_time_spinbox.setValue(0.0)
         self.dark_time_spinbox.setEnabled(False)  # 파일 로딩 전 비활성화
+        self.dark_time_spinbox.valueChanged.connect(self.on_dark_time_changed)
         baseline_layout.addWidget(self.dark_time_spinbox)
 
         # Dark Subtraction 체크박스
@@ -309,12 +312,9 @@ class OESAnalyzer(QMainWindow):
             # 첫 번째 시간으로 초기화
             self.current_time = self.run_times[0]
 
-            # Dark Time SpinBox 범위 설정 (처음 10% 구간만)
-            total_duration = max_time - min_time
-            dark_max_time = min_time + (total_duration * 0.1)
-
+            # Dark Time SpinBox 범위 설정 (전 구간)
             self.dark_time_spinbox.setMinimum(min_time)
-            self.dark_time_spinbox.setMaximum(dark_max_time)
+            self.dark_time_spinbox.setMaximum(max_time)  # 전 구간으로 변경
             self.dark_time_spinbox.setValue(min_time)
             self.dark_time_spinbox.setEnabled(True)
             self.dark_subtraction_checkbox.setEnabled(True)
@@ -652,6 +652,48 @@ class OESAnalyzer(QMainWindow):
 
         return spectrum
 
+    def on_dark_time_changed(self):
+        """Dark Time 값 변경 시 호출"""
+        # Dark Subtraction이 체크되어 있으면 재계산
+        if self.dark_subtraction_enabled:
+            # Dark Spectrum 재계산
+            dark_time = self.dark_time_spinbox.value()
+            self.dark_spectrum = self.calculate_dark_spectrum(dark_time)
+
+            # 전체 재계산
+            self.recalculate_all()
+
+    def draw_dark_time_line(self):
+        """창2에 Dark Subtraction Time 수직선 표시"""
+        dark_time = self.dark_time_spinbox.value()
+
+        # 수직선 표시
+        self.dark_time_vline = self.timeseries_ax.axvline(
+            x=dark_time,
+            linestyle=':',
+            color='#555555',
+            linewidth=1.0,
+            alpha=0.5
+        )
+
+        # Y축 범위
+        y_min, y_max = self.timeseries_ax.get_ylim()
+
+        # X축 범위
+        x_min, x_max = self.timeseries_ax.get_xlim()
+
+        # 텍스트 라벨 (우측 상단, 세 줄)
+        label_text = f'Dark\nSubtraction\nt = {dark_time:.1f} s'
+        self.dark_time_annotation = self.timeseries_ax.text(
+            dark_time + (x_max - x_min) * 0.01,
+            y_max * 0.95,
+            label_text,
+            fontsize=8,
+            color='#555555',
+            ha='left',
+            va='top'
+        )
+
     def on_dark_subtraction_changed(self, state):
         """Dark Subtraction 체크박스 상태 변경"""
         if state == Qt.Checked:
@@ -663,7 +705,7 @@ class OESAnalyzer(QMainWindow):
             # 보정 해제
             self.dark_subtraction_enabled = False
 
-        # 전체 재계산
+        # 전체 재계산 (창2에 Dark Time 수직선 표시/제거됨)
         self.recalculate_all()
 
     def recalculate_all(self):
@@ -675,6 +717,8 @@ class OESAnalyzer(QMainWindow):
         self.intensity_markers = []
         self.intensity_annotations = []
         self.texc_annotation = None
+        self.dark_time_vline = None
+        self.dark_time_annotation = None
 
         # 1. 창1 업데이트 (스펙트럼)
         self.update_spectrum()
@@ -689,10 +733,32 @@ class OESAnalyzer(QMainWindow):
         if self.boltzmann_window is not None and self.boltzmann_window.isVisible():
             self.update_boltzmann_plot()
 
+    def update_detected_wavelengths(self):
+        """현재 시간의 스펙트럼에서 각 발머 계열 파장 탐지"""
+        if self.data is None:
+            return
+
+        # 현재 시간의 스펙트럼 가져오기 (Dark Subtraction 적용 여부에 따라)
+        spectrum = self.get_current_spectrum(self.current_time)
+        window = self.window_size
+
+        self.detected_wavelengths = {}
+        for key in self.BALMER_KEYS:
+            theoretical_wl = self.BALMER_CONSTANTS[key]['wavelength']
+
+            # Local Maxima 탐지
+            found_wl = self.find_local_maxima_wavelength(
+                self.wavelengths, spectrum, theoretical_wl, window
+            )
+            self.detected_wavelengths[key] = found_wl
+
     def update_spectrum(self):
         """창1: 스펙트럼 그래프 업데이트"""
         if self.data is None:
             return
+
+        # 탐지된 파장 업데이트 (실시간)
+        self.update_detected_wavelengths()
 
         # 현재 시간의 스펙트럼 데이터 가져오기 (Dark Subtraction 적용 여부에 따라)
         spectrum = self.get_current_spectrum(self.current_time)
@@ -705,24 +771,26 @@ class OESAnalyzer(QMainWindow):
         self.spectrum_ax.set_title(f'Spectrum at t = {self.current_time:.1f} s', fontsize=10)
         self.spectrum_ax.grid(True, alpha=0.7, linestyle='--', color='lightgray')
 
-        # 탐지된 파장 위치에 수직선 표시
+        # 탐지된 파장 위치에 수직선 및 라벨 표시
         import matplotlib.pyplot as plt
         colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        y_min, y_max = self.spectrum_ax.get_ylim()
 
         for i, key in enumerate(self.BALMER_KEYS):
             if key in self.detected_wavelengths:
                 wl = self.detected_wavelengths[key]
                 color = colors[i % len(colors)]
+                display_name = self.BALMER_CONSTANTS[key]['display_name']
 
                 # 수직선
                 self.spectrum_ax.axvline(x=wl, linestyle=':', color=color,
                                           linewidth=1.0, alpha=0.7)
 
-                # 라벨 (상단에 표시)
-                y_max = self.spectrum_ax.get_ylim()[1]
-                self.spectrum_ax.text(wl, y_max * 0.95,
-                                       self.BALMER_CONSTANTS[key]['display_name'],
-                                       fontsize=8, ha='center', va='top', color=color)
+                # 라벨 (하단에 두 줄로 표시: 이름 + 파장값)
+                label_text = f'{display_name}\n{wl:.1f} nm'
+                self.spectrum_ax.text(wl, y_min + (y_max - y_min) * 0.02,
+                                       label_text,
+                                       fontsize=8, ha='center', va='bottom', color=color)
 
         self.spectrum_figure.tight_layout()
         self.spectrum_canvas.draw()
@@ -773,6 +841,8 @@ class OESAnalyzer(QMainWindow):
         self.intensity_markers = []
         self.intensity_annotations = []
         self.texc_annotation = None
+        self.dark_time_vline = None
+        self.dark_time_annotation = None
 
         # 보조 Y축이 있으면 제거
         if self.timeseries_ax2 is not None:
@@ -835,6 +905,11 @@ class OESAnalyzer(QMainWindow):
 
         self.timeseries_ax.set_title('Balmer Series Time Trace', fontsize=10)
         self.timeseries_ax.grid(True, alpha=0.7, linestyle='--', color='lightgray')
+
+        # Dark Subtraction Time 수직선 표시 (체크된 경우에만)
+        if self.dark_subtraction_enabled:
+            self.draw_dark_time_line()
+
         self.timeseries_figure.tight_layout()
         self.timeseries_canvas.draw()
 
