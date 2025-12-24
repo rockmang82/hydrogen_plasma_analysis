@@ -11,7 +11,7 @@ import pandas as pd
 from scipy.stats import linregress
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox,
-                             QFileDialog, QMessageBox, QSplitter, QLineEdit, QCheckBox)
+                             QFileDialog, QMessageBox, QSplitter, QLineEdit, QCheckBox, QGroupBox)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -20,34 +20,40 @@ from matplotlib.figure import Figure
 class OESAnalyzer(QMainWindow):
     """OES 데이터 분석 메인 윈도우"""
 
-    # 발머 계열 파장 정의 (nm)
-    BALMER_WAVELENGTHS = {
-        'Hα': 656.28,
-        'Hβ': 486.13,
-        'Hγ': 434.05
-    }
-
     # NIST 원자 스펙트럼 상수 (Boltzmann Plot Method용)
     BALMER_CONSTANTS = {
-        'Hα': {
-            'wavelength': 656.28,  # nm
+        'H_alpha': {
+            'wavelength': 656.28,  # nm (이론값)
             'g': 18,               # 통계적 가중치 (n=3, 2n²)
             'A': 4.41e7,           # 전이 확률 (s⁻¹)
-            'E': 12.09             # 상위 에너지 레벨 (eV)
+            'E': 12.09,            # 상위 에너지 레벨 (eV)
+            'display_name': 'Hα'
         },
-        'Hβ': {
+        'H_beta': {
             'wavelength': 486.13,  # nm
             'g': 32,               # 통계적 가중치 (n=4, 2n²)
             'A': 8.42e6,           # 전이 확률 (s⁻¹)
-            'E': 12.75             # 상위 에너지 레벨 (eV)
+            'E': 12.75,            # 상위 에너지 레벨 (eV)
+            'display_name': 'Hβ'
         },
-        'Hγ': {
+        'H_gamma': {
             'wavelength': 434.05,  # nm
             'g': 50,               # 통계적 가중치 (n=5, 2n²)
             'A': 2.53e6,           # 전이 확률 (s⁻¹)
-            'E': 13.05             # 상위 에너지 레벨 (eV)
+            'E': 13.05,            # 상위 에너지 레벨 (eV)
+            'display_name': 'Hγ'
+        },
+        'H_delta': {
+            'wavelength': 410.17,  # nm
+            'g': 72,               # 통계적 가중치 (n=6, 2n²)
+            'A': 9.73e5,           # 전이 확률 (s⁻¹)
+            'E': 13.22,            # 상위 에너지 레벨 (eV)
+            'display_name': 'Hδ'
         }
     }
+
+    # 발머 계열 순서 정의
+    BALMER_KEYS = ['H_alpha', 'H_beta', 'H_gamma', 'H_delta']
 
     # 볼츠만 상수 (eV/K)
     K_B = 8.617333262e-5
@@ -67,6 +73,13 @@ class OESAnalyzer(QMainWindow):
         self.balmer_timeseries = {}  # 전체 시계열 Intensity 데이터 캐시
         self.texc_timeseries = []  # 전체 시계열 Texc 데이터
         self.boltzmann_window = None  # 창3: Boltzmann Plot 팝업창
+
+        # Local Maxima 탐지 관련
+        self.detected_wavelengths = {}  # 탐지된 실제 피크 파장 {key: wavelength}
+
+        # Dark Spectrum Subtraction 관련
+        self.dark_spectrum = None  # Dark Spectrum 배열
+        self.dark_subtraction_enabled = False  # Dark Subtraction 활성화 여부
 
         self.init_ui()
 
@@ -142,6 +155,16 @@ class OESAnalyzer(QMainWindow):
         self.texc_lineedit = QLineEdit()
         self.texc_lineedit.setReadOnly(True)
         self.texc_lineedit.setText('---')
+        # 스타일 설정: 연한 빨강 배경, 굵은 글씨
+        self.texc_lineedit.setStyleSheet("""
+            QLineEdit {
+                background-color: #FFE4E1;
+                font-weight: bold;
+                padding: 4px;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+        """)
         layout.addWidget(self.texc_lineedit)
 
         self.r2_label = QLabel('(R² = ---)')
@@ -154,6 +177,34 @@ class OESAnalyzer(QMainWindow):
         self.boltzmann_checkbox.setChecked(False)
         self.boltzmann_checkbox.stateChanged.connect(self.on_boltzmann_checkbox_changed)
         layout.addWidget(self.boltzmann_checkbox)
+
+        layout.addSpacing(20)
+
+        # Baseline Correction 그룹박스
+        baseline_group = QGroupBox("Baseline Correction")
+        baseline_layout = QVBoxLayout()
+
+        # Dark Time 라벨 및 입력
+        dark_time_label = QLabel("Dark Time (sec)")
+        baseline_layout.addWidget(dark_time_label)
+
+        self.dark_time_spinbox = QDoubleSpinBox()
+        self.dark_time_spinbox.setDecimals(1)
+        self.dark_time_spinbox.setSingleStep(0.5)
+        self.dark_time_spinbox.setMinimum(0.0)
+        self.dark_time_spinbox.setMaximum(1.0)  # 파일 로딩 후 업데이트
+        self.dark_time_spinbox.setValue(0.0)
+        self.dark_time_spinbox.setEnabled(False)  # 파일 로딩 전 비활성화
+        baseline_layout.addWidget(self.dark_time_spinbox)
+
+        # Dark Subtraction 체크박스
+        self.dark_subtraction_checkbox = QCheckBox("Dark Subtraction")
+        self.dark_subtraction_checkbox.setEnabled(False)  # 파일 로딩 전 비활성화
+        self.dark_subtraction_checkbox.stateChanged.connect(self.on_dark_subtraction_changed)
+        baseline_layout.addWidget(self.dark_subtraction_checkbox)
+
+        baseline_group.setLayout(baseline_layout)
+        layout.addWidget(baseline_group)
 
         layout.addStretch()
 
@@ -258,6 +309,16 @@ class OESAnalyzer(QMainWindow):
             # 첫 번째 시간으로 초기화
             self.current_time = self.run_times[0]
 
+            # Dark Time SpinBox 범위 설정 (처음 10% 구간만)
+            total_duration = max_time - min_time
+            dark_max_time = min_time + (total_duration * 0.1)
+
+            self.dark_time_spinbox.setMinimum(min_time)
+            self.dark_time_spinbox.setMaximum(dark_max_time)
+            self.dark_time_spinbox.setValue(min_time)
+            self.dark_time_spinbox.setEnabled(True)
+            self.dark_subtraction_checkbox.setEnabled(True)
+
             # 그래프 업데이트
             self.update_spectrum()
             self.update_timeseries()
@@ -266,6 +327,94 @@ class OESAnalyzer(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, '오류', f'파일 로딩 실패:\n{str(e)}')
+
+    def find_local_maxima_wavelength(self, wavelengths, intensity, theoretical_wl, window):
+        """
+        이론 파장 주변에서 실제 피크 파장을 탐지 (Local Maxima Detection)
+
+        Parameters:
+        -----------
+        wavelengths : numpy.array
+            전체 파장 배열
+        intensity : numpy.array
+            전체 강도 배열
+        theoretical_wl : float
+            이론 파장 (nm)
+        window : float
+            평균화 윈도우 크기 (nm)
+
+        Returns:
+        --------
+        float : 탐지된 실제 피크 파장
+        """
+        # 탐색 범위 = Window × 4
+        search_range = window * 4
+
+        # 탐색 범위 내 데이터 추출
+        mask = (wavelengths >= theoretical_wl - search_range) & \
+               (wavelengths <= theoretical_wl + search_range)
+        subset_wavelengths = wavelengths[mask]
+        subset_intensity = intensity[mask]
+
+        if len(subset_intensity) == 0:
+            return theoretical_wl  # fallback
+
+        # 범위 내 최대값 위치 탐지 (np.argmax)
+        max_idx = np.argmax(subset_intensity)
+        found_wavelength = subset_wavelengths[max_idx]
+
+        # 이론 파장과의 거리 검증 (±4nm 이내)
+        # ±4nm 초과해도 범위 내 최대값 위치를 강제로 사용
+        distance = abs(found_wavelength - theoretical_wl)
+        if distance > 4.0:
+            # 범위 내 최대값 위치 그대로 사용
+            pass
+
+        return found_wavelength
+
+    def calculate_balmer_intensity(self, wavelengths, intensity, theoretical_wl, window):
+        """
+        Local Maxima 탐지 후 가우시안 가중 평균으로 Intensity 계산
+
+        Parameters:
+        -----------
+        wavelengths : numpy.array
+            전체 파장 배열
+        intensity : numpy.array
+            전체 강도 배열
+        theoretical_wl : float
+            이론 파장 (nm)
+        window : float
+            평균화 윈도우 크기 (nm)
+
+        Returns:
+        --------
+        tuple : (weighted_intensity, actual_wavelength)
+            - weighted_intensity: 가중 평균된 강도
+            - actual_wavelength: 탐지된 실제 피크 파장
+        """
+        # 1. 실제 피크 파장 탐지
+        actual_wavelength = self.find_local_maxima_wavelength(
+            wavelengths, intensity, theoretical_wl, window
+        )
+
+        # 2. 찾은 파장 기준으로 가우시안 가중 평균 적용
+        mask = (wavelengths >= actual_wavelength - window) & \
+               (wavelengths <= actual_wavelength + window)
+        subset_wavelengths = wavelengths[mask]
+        subset_intensity = intensity[mask]
+
+        if len(subset_intensity) == 0:
+            return 0.0, actual_wavelength
+
+        # 가우시안 가중치 계산
+        sigma = window / 2
+        weights = np.exp(-((subset_wavelengths - actual_wavelength) ** 2) / (2 * sigma ** 2))
+
+        # 가중 평균
+        weighted_intensity = np.sum(weights * subset_intensity) / np.sum(weights)
+
+        return weighted_intensity, actual_wavelength
 
     def gaussian_weighted_average(self, wavelength_center, spectrum_data):
         """
@@ -337,7 +486,7 @@ class OESAnalyzer(QMainWindow):
         Parameters:
         -----------
         intensities : dict
-            {'Hα': I_alpha, 'Hβ': I_beta, 'Hγ': I_gamma} 형태의 Intensity 딕셔너리
+            발머 계열 Intensity 딕셔너리 (4개: H_alpha, H_beta, H_gamma, H_delta)
 
         Returns:
         --------
@@ -351,9 +500,9 @@ class OESAnalyzer(QMainWindow):
             x_data = []  # E_n (eV)
             y_data = []  # ln(I × λ / (g × A))
 
-            for name in ['Hα', 'Hβ', 'Hγ']:
-                I = intensities[name]
-                const = self.BALMER_CONSTANTS[name]
+            for key in self.BALMER_KEYS:
+                I = intensities[key]
+                const = self.BALMER_CONSTANTS[key]
 
                 # Intensity 유효성 검사
                 if I <= 0:
@@ -422,13 +571,126 @@ class OESAnalyzer(QMainWindow):
 
         return spectrum
 
+    def calculate_dark_spectrum(self, dark_time):
+        """
+        Dark Spectrum 계산 (입력 시점 ± 범위의 평균)
+
+        Parameters:
+        -----------
+        dark_time : float
+            Dark Spectrum 측정 시간 (초)
+
+        Returns:
+        --------
+        numpy.array : Dark Spectrum (파장별 강도 배열)
+        """
+        # 시간 범위: ±0.5초
+        time_window = 0.5
+
+        # 범위 내 인덱스 찾기
+        mask = (self.run_times >= dark_time - time_window) & \
+               (self.run_times <= dark_time + time_window)
+        indices = np.where(mask)[0]
+
+        if len(indices) == 0:
+            # 가장 가까운 시점 사용
+            idx = np.argmin(np.abs(self.run_times - dark_time))
+            indices = [idx]
+
+        # 해당 시점들의 스펙트럼 평균
+        dark_spectra = []
+        for idx in indices:
+            spectrum = self.data.iloc[idx, 2:].values.astype(float)
+            dark_spectra.append(spectrum)
+
+        dark_spectrum = np.mean(dark_spectra, axis=0)
+        return dark_spectrum
+
+    def apply_dark_subtraction(self, spectrum):
+        """
+        Dark Spectrum Subtraction 적용
+
+        Parameters:
+        -----------
+        spectrum : numpy.array
+            원본 스펙트럼
+
+        Returns:
+        --------
+        numpy.array : 보정된 스펙트럼
+        """
+        if self.dark_spectrum is None:
+            return spectrum
+
+        # 원본 스펙트럼에서 Dark Spectrum 차감
+        corrected_spectrum = spectrum - self.dark_spectrum
+
+        # 음수 값 처리 (0으로 클리핑)
+        corrected_spectrum = np.maximum(corrected_spectrum, 0)
+
+        return corrected_spectrum
+
+    def get_current_spectrum(self, time):
+        """
+        현재 설정에 따라 보정된 스펙트럼 반환
+
+        Parameters:
+        -----------
+        time : float
+            추출할 시간 (초)
+
+        Returns:
+        --------
+        numpy.array : 스펙트럼 (Dark Subtraction 적용 여부에 따라)
+        """
+        # 원본 스펙트럼 가져오기
+        spectrum = self.get_spectrum_at_time(time)
+
+        # Dark Subtraction 적용 여부
+        if self.dark_subtraction_enabled and self.dark_spectrum is not None:
+            spectrum = self.apply_dark_subtraction(spectrum)
+
+        return spectrum
+
+    def on_dark_subtraction_changed(self, state):
+        """Dark Subtraction 체크박스 상태 변경"""
+        if state == Qt.Checked:
+            # Dark Spectrum 계산
+            dark_time = self.dark_time_spinbox.value()
+            self.dark_spectrum = self.calculate_dark_spectrum(dark_time)
+            self.dark_subtraction_enabled = True
+        else:
+            # 보정 해제
+            self.dark_subtraction_enabled = False
+
+        # 전체 재계산
+        self.recalculate_all()
+
+    def recalculate_all(self):
+        """모든 결과값 재계산 (Dark Subtraction 적용/해제 시)"""
+        if self.data is None:
+            return
+
+        # 1. 창1 업데이트 (스펙트럼)
+        self.update_spectrum()
+
+        # 2. 발머 계열 Intensity 재계산 및 창2 업데이트
+        self.update_timeseries()
+
+        # 3. Texc 재계산
+        self.update_texc_display()
+
+        # 4. 창3 업데이트 (Boltzmann Plot, 열려있는 경우)
+        if self.boltzmann_window is not None and self.boltzmann_window.isVisible():
+            self.update_boltzmann_plot()
+
     def update_spectrum(self):
         """창1: 스펙트럼 그래프 업데이트"""
         if self.data is None:
             return
 
-        # 현재 시간의 스펙트럼 데이터 가져오기
-        spectrum = self.get_spectrum_at_time(self.current_time)
+        # 현재 시간의 스펙트럼 데이터 가져오기 (Dark Subtraction 적용 여부에 따라)
+        spectrum = self.get_current_spectrum(self.current_time)
 
         # 그래프 업데이트
         self.spectrum_ax.clear()
@@ -437,6 +699,26 @@ class OESAnalyzer(QMainWindow):
         self.spectrum_ax.set_ylabel('Emission Intensity (a.u.)', fontsize=10)
         self.spectrum_ax.set_title(f'Spectrum at t = {self.current_time:.1f} s', fontsize=10)
         self.spectrum_ax.grid(True, alpha=0.7, linestyle='--', color='lightgray')
+
+        # 탐지된 파장 위치에 수직선 표시
+        import matplotlib.pyplot as plt
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+        for i, key in enumerate(self.BALMER_KEYS):
+            if key in self.detected_wavelengths:
+                wl = self.detected_wavelengths[key]
+                color = colors[i % len(colors)]
+
+                # 수직선
+                self.spectrum_ax.axvline(x=wl, linestyle=':', color=color,
+                                          linewidth=1.0, alpha=0.7)
+
+                # 라벨 (상단에 표시)
+                y_max = self.spectrum_ax.get_ylim()[1]
+                self.spectrum_ax.text(wl, y_max * 0.95,
+                                       self.BALMER_CONSTANTS[key]['display_name'],
+                                       fontsize=8, ha='center', va='top', color=color)
+
         self.spectrum_figure.tight_layout()
         self.spectrum_canvas.draw()
 
@@ -446,18 +728,31 @@ class OESAnalyzer(QMainWindow):
             return
 
         # 각 발머 계열 파장에 대한 시계열 데이터 계산
-        self.balmer_timeseries = {name: [] for name in self.BALMER_WAVELENGTHS.keys()}
+        self.balmer_timeseries = {key: [] for key in self.BALMER_KEYS}
         self.texc_timeseries = []
+        self.detected_wavelengths.clear()  # 탐지된 파장 초기화
 
         for i in range(len(self.run_times)):
-            spectrum = self.data.iloc[i, 2:].values.astype(float)
+            # 현재 시간의 스펙트럼 가져오기 (Dark Subtraction 적용 여부에 따라)
+            time = self.run_times[i]
+            spectrum = self.get_current_spectrum(time)
 
-            # Intensity 계산
+            # Local Maxima 탐지 및 Intensity 계산
             intensities = {}
-            for name, wavelength in self.BALMER_WAVELENGTHS.items():
-                intensity = self.gaussian_weighted_average(wavelength, spectrum)
-                self.balmer_timeseries[name].append(intensity)
-                intensities[name] = intensity
+            for key in self.BALMER_KEYS:
+                theoretical_wl = self.BALMER_CONSTANTS[key]['wavelength']
+
+                # Local Maxima 탐지 및 가우시안 가중 평균
+                intensity, actual_wl = self.calculate_balmer_intensity(
+                    self.wavelengths, spectrum, theoretical_wl, self.window_size
+                )
+
+                self.balmer_timeseries[key].append(intensity)
+                intensities[key] = intensity
+
+                # 현재 시간의 탐지된 파장 저장 (창1 표시용)
+                if i == self.get_time_index(self.current_time):
+                    self.detected_wavelengths[key] = actual_wl
 
             # Texc 계산
             texc_eV, r2, error_msg = self.calculate_texc(intensities)
@@ -474,20 +769,25 @@ class OESAnalyzer(QMainWindow):
             self.timeseries_ax2.remove()
             self.timeseries_ax2 = None
 
-        # 3개 Intensity 라인 그리기 (좌측 Y축)
-        colors = ['C0', 'C1', 'C2']  # Matplotlib 기본 색상 순환
+        # 4개 Intensity 라인 그리기 (좌측 Y축)
+        import matplotlib.pyplot as plt
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         lines1 = []
         labels1 = []
-        for i, (name, wavelength) in enumerate(self.BALMER_WAVELENGTHS.items()):
+        for i, key in enumerate(self.BALMER_KEYS):
+            wavelength = self.BALMER_CONSTANTS[key]['wavelength']
+            display_name = self.BALMER_CONSTANTS[key]['display_name']
+            color = colors[i % len(colors)]
+
             line, = self.timeseries_ax.plot(
                 self.run_times,
-                self.balmer_timeseries[name],
-                label=f'{name} ({wavelength} nm)',
-                color=colors[i],
+                self.balmer_timeseries[key],
+                label=f'{display_name} ({wavelength} nm)',
+                color=color,
                 linewidth=1.5
             )
             lines1.append(line)
-            labels1.append(f'{name} ({wavelength} nm)')
+            labels1.append(f'{display_name} ({wavelength} nm)')
 
         # 보조 Y축 생성 (우측)
         self.timeseries_ax2 = self.timeseries_ax.twinx()
@@ -544,18 +844,21 @@ class OESAnalyzer(QMainWindow):
 
         # balmer_timeseries가 비어있으면 직접 계산
         if not self.balmer_timeseries:
-            spectrum = self.get_spectrum_at_time(self.current_time)
-            for name, wavelength in self.BALMER_WAVELENGTHS.items():
-                intensity = self.gaussian_weighted_average(wavelength, spectrum)
-                intensities[name] = intensity
+            spectrum = self.get_current_spectrum(self.current_time)
+            for key in self.BALMER_KEYS:
+                theoretical_wl = self.BALMER_CONSTANTS[key]['wavelength']
+                intensity, _ = self.calculate_balmer_intensity(
+                    self.wavelengths, spectrum, theoretical_wl, self.window_size
+                )
+                intensities[key] = intensity
         else:
             # 캐시된 데이터 사용 (추가 범위 검증)
-            for name in self.BALMER_WAVELENGTHS.keys():
+            for key in self.BALMER_KEYS:
                 # balmer_timeseries의 길이 확인
-                if idx >= len(self.balmer_timeseries[name]):
+                if idx >= len(self.balmer_timeseries[key]):
                     # 범위 초과 시 마지막 인덱스로 조정
-                    idx = len(self.balmer_timeseries[name]) - 1
-                intensities[name] = self.balmer_timeseries[name][idx]
+                    idx = len(self.balmer_timeseries[key]) - 1
+                intensities[key] = self.balmer_timeseries[key][idx]
 
         # Texc 계산
         texc_eV, r2, error_msg = self.calculate_texc(intensities)
@@ -615,23 +918,25 @@ class OESAnalyzer(QMainWindow):
         idx = self.get_time_index(self.current_time)
 
         # 각 라인의 Intensity 값 가져오기
-        colors = ['C0', 'C1', 'C2']
+        import matplotlib.pyplot as plt
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         intensities = {}
 
-        for i, name in enumerate(['Hα', 'Hβ', 'Hγ']):
+        for i, key in enumerate(self.BALMER_KEYS):
             # 인덱스 범위 검증
-            if idx >= len(self.balmer_timeseries[name]):
-                idx = len(self.balmer_timeseries[name]) - 1
-            intensity = self.balmer_timeseries[name][idx]
-            intensities[name] = intensity
+            if idx >= len(self.balmer_timeseries[key]):
+                idx = len(self.balmer_timeseries[key]) - 1
+            intensity = self.balmer_timeseries[key][idx]
+            intensities[key] = intensity
 
             # 마커 표시
+            color = colors[i % len(colors)]
             marker, = self.timeseries_ax.plot(
                 self.current_time,
                 intensity,
                 marker='o',
                 markersize=8,
-                color=colors[i],
+                color=color,
                 markeredgecolor='white',
                 markeredgewidth=1.5,
                 zorder=10
@@ -749,14 +1054,14 @@ class OESAnalyzer(QMainWindow):
         y_values = []
         intensities = {}
 
-        for name in ['Hα', 'Hβ', 'Hγ']:
+        for key in self.BALMER_KEYS:
             # 인덱스 범위 검증
-            if idx >= len(self.balmer_timeseries[name]):
-                idx = len(self.balmer_timeseries[name]) - 1
+            if idx >= len(self.balmer_timeseries[key]):
+                idx = len(self.balmer_timeseries[key]) - 1
 
-            intensity = self.balmer_timeseries[name][idx]
-            intensities[name] = intensity
-            const = self.BALMER_CONSTANTS[name]
+            intensity = self.balmer_timeseries[key][idx]
+            intensities[key] = intensity
+            const = self.BALMER_CONSTANTS[key]
 
             # 유효하지 않은 intensity 체크
             if intensity <= 0:
@@ -876,8 +1181,8 @@ class BoltzmannPlotWindow(QWidget):
         """그래프 업데이트"""
         self.ax.clear()
 
-        # 라벨 리스트 (그리스 문자 사용)
-        labels = ['Hα', 'Hβ', 'Hγ']
+        # 라벨 리스트 (그리스 문자 사용, 4개 발머 라인)
+        labels = ['Hα', 'Hβ', 'Hγ', 'Hδ']
 
         # 데이터 포인트 표시
         self.ax.plot(energy_levels, y_values, 'o',
