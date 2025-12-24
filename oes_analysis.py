@@ -671,6 +671,11 @@ class OESAnalyzer(QMainWindow):
         if self.data is None:
             return
 
+        # 기존 마커 참조 초기화 (그래프 재생성 전)
+        self.intensity_markers = []
+        self.intensity_annotations = []
+        self.texc_annotation = None
+
         # 1. 창1 업데이트 (스펙트럼)
         self.update_spectrum()
 
@@ -763,6 +768,11 @@ class OESAnalyzer(QMainWindow):
 
         # 그래프 업데이트
         self.timeseries_ax.clear()
+
+        # clear 후 참조 초기화 (axes가 clear되면 모든 artist가 무효화됨)
+        self.intensity_markers = []
+        self.intensity_annotations = []
+        self.texc_annotation = None
 
         # 보조 Y축이 있으면 제거
         if self.timeseries_ax2 is not None:
@@ -893,21 +903,68 @@ class OESAnalyzer(QMainWindow):
             self.update_boltzmann_plot()
 
     def clear_intensity_markers(self):
-        """창2의 Intensity 마커와 annotation 제거"""
-        # 마커 제거
-        for marker in self.intensity_markers:
-            marker.remove()
+        """창2의 Intensity 마커와 annotation 제거 (안전한 제거)"""
+        # 마커 제거 (예외 처리 포함)
+        if hasattr(self, 'intensity_markers') and self.intensity_markers:
+            for marker in self.intensity_markers:
+                try:
+                    if marker is not None and hasattr(marker, 'axes') and marker.axes is not None:
+                        marker.remove()
+                except (NotImplementedError, ValueError, AttributeError):
+                    pass  # 이미 제거되었거나 무효한 객체는 무시
+            self.intensity_markers = []
+
+        # Annotation 제거 (예외 처리 포함)
+        if hasattr(self, 'intensity_annotations') and self.intensity_annotations:
+            for ann in self.intensity_annotations:
+                try:
+                    if ann is not None and hasattr(ann, 'axes') and ann.axes is not None:
+                        ann.remove()
+                except (NotImplementedError, ValueError, AttributeError):
+                    pass  # 이미 제거되었거나 무효한 객체는 무시
+            self.intensity_annotations = []
+
+        # Texc annotation 제거 (예외 처리 포함)
+        if hasattr(self, 'texc_annotation') and self.texc_annotation is not None:
+            try:
+                if hasattr(self.texc_annotation, 'axes') and self.texc_annotation.axes is not None:
+                    self.texc_annotation.remove()
+            except (NotImplementedError, ValueError, AttributeError):
+                pass  # 이미 제거되었거나 무효한 객체는 무시
+            self.texc_annotation = None
+
+    def safe_clear_markers(self):
+        """안전하게 마커 제거 (예외 처리 포함, 별도 함수)"""
+
+        # intensity_markers 제거
+        markers_to_clear = getattr(self, 'intensity_markers', []) or []
+        for marker in markers_to_clear:
+            try:
+                if marker is not None and hasattr(marker, 'axes') and marker.axes is not None:
+                    marker.remove()
+            except Exception:
+                pass  # 모든 예외 무시
         self.intensity_markers = []
 
-        # Annotation 제거
-        for ann in self.intensity_annotations:
-            ann.remove()
+        # intensity_annotations 제거
+        annotations_to_clear = getattr(self, 'intensity_annotations', []) or []
+        for ann in annotations_to_clear:
+            try:
+                if ann is not None and hasattr(ann, 'axes') and ann.axes is not None:
+                    ann.remove()
+            except Exception:
+                pass  # 모든 예외 무시
         self.intensity_annotations = []
 
-        # Texc annotation 제거
-        if self.texc_annotation is not None:
-            self.texc_annotation.remove()
-            self.texc_annotation = None
+        # texc_annotation 제거
+        texc_ann = getattr(self, 'texc_annotation', None)
+        if texc_ann is not None:
+            try:
+                if hasattr(texc_ann, 'axes') and texc_ann.axes is not None:
+                    texc_ann.remove()
+            except Exception:
+                pass  # 모든 예외 무시
+        self.texc_annotation = None
 
     def display_intensity_markers(self):
         """창2에 현재 시간의 Intensity 마커와 Texc 표시"""
